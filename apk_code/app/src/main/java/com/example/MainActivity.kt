@@ -14,6 +14,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -26,9 +28,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -47,6 +52,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -77,59 +83,22 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
-                Scaffold(
-                    modifier = Modifier.fillMaxSize()
-                ) { innerPadding ->
-                    ValentineAppScreen(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                    )
-                }
+                ValentineAppScreen()
             }
         }
     }
 }
 
-// Reusable Extension function for Liquid Glass (Glassmorphism) look
-fun Modifier.glassmorphic(
-    cornerRadius: androidx.compose.ui.unit.Dp = 28.dp,
-    borderWidth: androidx.compose.ui.unit.Dp = 1.2.dp
-): Modifier = this
-    .shadow(
-        elevation = 20.dp,
-        shape = RoundedCornerShape(cornerRadius),
-        ambientColor = Color(0xFFFF4D6D).copy(alpha = 0.35f),
-        spotColor = Color(0xFFFF2A54).copy(alpha = 0.45f)
-    )
-    .clip(RoundedCornerShape(cornerRadius))
-    .background(
-        Brush.verticalGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.26f),
-                Color.White.copy(alpha = 0.08f)
-            )
-        )
-    )
-    .border(
-        width = borderWidth,
-        brush = Brush.verticalGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.65f),
-                Color.White.copy(alpha = 0.15f),
-                Color(0xFFFFB3C1).copy(alpha = 0.35f)
-            )
-        ),
-        shape = RoundedCornerShape(cornerRadius)
-    )
-
 @Composable
-fun ValentineAppScreen(modifier: Modifier = Modifier) {
+fun ValentineAppScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("valentinka_prefs", Context.MODE_PRIVATE) }
 
-    // Read stored items
+    // Navigation Tab Selection State
+    var selectedTab by remember { mutableStateOf(0) }
+
+    // Read stored active message states
     var latestMessage by remember {
         mutableStateOf(prefs.getString("latest_message", "") ?: "")
     }
@@ -146,6 +115,10 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
         mutableStateOf(prefs.getBoolean("timer_is_active", false))
     }
 
+    // Initialize Room database & reactive stream
+    val db = remember { DatabaseProvider.getDatabase(context) }
+    val historyItems by db.valentineHistoryDao().getAllHistory().collectAsState(initial = emptyList())
+
     // Set fallback initial message if empty
     if (latestMessage.isEmpty()) {
         latestMessage = "Добро пожаловать в приложение Валентинка! Пусть твоё сердце всегда будет согрето любовью и нежностью. ❤️"
@@ -154,6 +127,20 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
             putString("latest_message", latestMessage)
             putLong("latest_message_time", latestMessageTime)
             apply()
+        }
+    }
+
+    // Auto-bootstrap Room history table with the initial message if totally empty
+    LaunchedEffect(historyItems) {
+        if (historyItems.isEmpty()) {
+            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                db.valentineHistoryDao().insertHistoryItem(
+                    ValentineHistoryItem(
+                        message = "Добро пожаловать в приложение Валентинка! Пусть твоё сердце всегда будет согрето любовью и нежностью. ❤️",
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+            }
         }
     }
 
@@ -186,7 +173,7 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    // Dynamic state polling (checks shared preference changes)
+    // Dynamic state polling (checks shared preference changes & updates the current screen view)
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000)
@@ -214,11 +201,11 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    // Heart particles states
+    // Heart particles state lists for rendering engine
     val localHearts = remember { ArrayList<HeartParticle>() }
     var heartsState by remember { mutableStateOf(emptyList<HeartParticle>()) }
 
-    // Ambient Floating Hearts Physics Loop
+    // Ambient Floating Hearts Physics Loop inside Coroutine
     LaunchedEffect(Unit) {
         var lastTime = System.nanoTime()
         while (true) {
@@ -230,7 +217,7 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
                 synchronized(localHearts) {
                     val updatedHearts = ArrayList<HeartParticle>()
 
-                    // 1. Update existing hearts positions and velocities
+                    // 1. Move and wobble floating hearts upwards
                     for (i in 0 until localHearts.size) {
                         val heart = localHearts[i]
                         val nextY = heart.y - (heart.speedY * 130f * elapsedSec)
@@ -252,14 +239,14 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
                     localHearts.clear()
                     localHearts.addAll(updatedHearts)
 
-                    // 2. Generate ambient background hearts
+                    // 2. Spawn ambient background hearts in bounds
                     if (localHearts.size < 25) {
                         val colors = listOf(
                             Color(0xFFFF3354),
                             Color(0xFFFF5C75),
                             Color(0xFFFF8597),
                             Color(0xFFFFB3C1),
-                            Color(0xFFDDA0DD), // Plum / Lilac accent
+                            Color(0xFFDDA0DD),
                             Color(0xFFE8AEFF)
                         )
                         localHearts.add(
@@ -278,21 +265,21 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
                         )
                     }
 
-                    // Publish the complete updated frame state at once
+                    // Update drawing state
                     heartsState = ArrayList(localHearts)
                 }
             }
         }
     }
 
-    // Heart splash/burst effect on click or tap
+    // Tap/touch feedback explosion handler
     fun spawnHeartBurst(centerX: Float, centerY: Float, count: Int = 16) {
         val colors = listOf(
             Color(0xFFFF0A35),
             Color(0xFFFF4D6D),
             Color(0xFFFF758F),
             Color(0xFFFFCCD5),
-            Color(0xFFEB5E28), // warm sunset orange
+            Color(0xFFEB5E28),
             Color(0xFFFF8FA3),
             Color(0xFFD62246)
         )
@@ -301,7 +288,7 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
                 val angle = Random.nextFloat() * 2f * 3.1415927f
                 val magnitude = Random.nextFloat() * (12f - 3f) + 3f
                 val speedX = Math.cos(angle.toDouble()).toFloat() * magnitude
-                val speedY = Math.sin(angle.toDouble()).toFloat() * magnitude - 3.2f // upward tilt
+                val speedY = Math.sin(angle.toDouble()).toFloat() * magnitude - 3.2f
                 localHearts.add(
                     HeartParticle(
                         id = UUID.randomUUID().mostSignificantBits,
@@ -321,95 +308,201 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    // Base background with deep rich cosmos-romantic gradients for stunning glassmorphic output
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF2B0A1A), // Dark velvet mystery
-                        Color(0xFF4C1027), // Deep wild cherry
-                        Color(0xFF1B0711)  // Bottom cosmos black-rose
-                    )
+    // Material 3 Responsive layout Scaffold with Bottom Tab Switcher
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = Color.Transparent, // Let global backgrounds & particles show through
+        bottomBar = {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                tonalElevation = 8.dp,
+                modifier = Modifier
+                    .shadow(12.dp, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                    .testTag("app_navigation_bar")
+            ) {
+                NavigationBarItem(
+                    selected = selectedTab == 0,
+                    onClick = { selectedTab = 0 },
+                    icon = { Icon(Icons.Default.Favorite, contentDescription = "Открытка") },
+                    label = { Text("Открытка") },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    ),
+                    modifier = Modifier.testTag("tab_card")
                 )
-            )
-            .pointerInput(Unit) {
-                detectTapGestures { offset ->
-                    spawnHeartBurst(offset.x, offset.y, count = 12)
-                }
-            }
-    ) {
-        // Floating Hearts underlay
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            heartsState.forEach { heart ->
-                drawHeart(
-                    x = heart.x,
-                    y = heart.y,
-                    sz = heart.size,
-                    color = heart.color,
-                    alpha = heart.alpha,
-                    rotation = heart.rotation
+                NavigationBarItem(
+                    selected = selectedTab == 1,
+                    onClick = { selectedTab = 1 },
+                    icon = { Icon(Icons.Default.Notifications, contentDescription = "Таймер") },
+                    label = { Text("Таймер") },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    ),
+                    modifier = Modifier.testTag("tab_timer")
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = "История") },
+                    label = { Text("История") },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    ),
+                    modifier = Modifier.testTag("tab_history")
                 )
             }
         }
-
-        // Main User Interface Content Container
-        Column(
+    ) { innerPadding ->
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(22.dp)
+                .background(MaterialTheme.colorScheme.background)
+                .pointerInput(Unit) {
+                    detectTapGestures { offset ->
+                        spawnHeartBurst(offset.x, offset.y, count = 12)
+                    }
+                }
         ) {
-            // Elegant glowing Header
-            AppHeaderSection()
-
-            // Notification permission banner if missing on Android 13+
-            if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                PermissionRequestBanner {
-                    launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            // Heart particle floating canvas background
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                heartsState.forEach { heart ->
+                    drawHeart(
+                        x = heart.x,
+                        y = heart.y,
+                        sz = heart.size,
+                        color = heart.color,
+                        alpha = heart.alpha,
+                        rotation = heart.rotation
+                    )
                 }
             }
 
-            // Liquid Glass Valentine Card
-            ValentineCard(
-                messageText = latestMessage,
-                timestamp = latestMessageTime,
-                onCardClick = { x, y ->
-                    spawnHeartBurst(x + 100f, y + 120f, count = 25)
+            // Outer Screen Container carrying header & Crossfaded tab contents
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Header remains globally locked at top for dynamic branding
+                AppHeaderSection()
+
+                // OS Notification Permission Banner if missing
+                if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    PermissionRequestBanner {
+                        launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
                 }
-            )
 
-            // Infinite Looping Timer Controller (Liquid Glass Design)
-            TimerControlSection(
-                timerEndTime = timerEndTime,
-                timerIntervalSeconds = timerIntervalSeconds,
-                timerIsActive = timerIsActive,
-                onStartTimer = { seconds ->
-                    // Set and trigger the recurring Alarm cycle via our central scheduler
-                    AlarmScheduler.schedule(context, seconds)
+                // Smooth sliding tab crossfade container
+                Crossfade(
+                    targetState = selectedTab,
+                    animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) { currentTab ->
+                    when (currentTab) {
+                        0 -> {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(rememberScrollState()),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                // Full Visual Greeting Card
+                                ValentineCard(
+                                    messageText = latestMessage,
+                                    timestamp = latestMessageTime,
+                                    onCardClick = { x, y ->
+                                        spawnHeartBurst(x + 100f, y + 120f, count = 25)
+                                    }
+                                )
 
-                    // Immediate feedback explosion!
-                    spawnHeartBurst(600f, 950f, count = 24)
-
-                    Toast.makeText(
-                        context,
-                        "Таймер запущен на повторение каждые ${formatDurationRussian(seconds)}! ❤️",
-                        Toast.LENGTH_LONG
-                    ).show()
-                },
-                onCancelTimer = {
-                    AlarmScheduler.cancel(context)
-                    Toast.makeText(context, "Бесконечный таймер остановлен.", Toast.LENGTH_SHORT).show()
+                                // Educational context
+                                M3InfoBox()
+                            }
+                        }
+                        1 -> {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(rememberScrollState()),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                // Magical Repeating Timer
+                                TimerControlSection(
+                                    timerEndTime = timerEndTime,
+                                    timerIntervalSeconds = timerIntervalSeconds,
+                                    timerIsActive = timerIsActive,
+                                    onStartTimer = { seconds ->
+                                        AlarmScheduler.schedule(context, seconds)
+                                        spawnHeartBurst(600f, 950f, count = 24)
+                                        Toast.makeText(
+                                            context,
+                                            "Автоповтор запущен на каждые ${formatDurationRussian(seconds)}! ❤️",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    },
+                                    onCancelTimer = {
+                                        AlarmScheduler.cancel(context)
+                                        Toast.makeText(context, "Автоповтор остановлен.", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
+                        }
+                        2 -> {
+                            Column(
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                // Room Database History List (History Tab)
+                                ValentineHistorySection(
+                                    historyList = historyItems,
+                                    currentActiveMessage = latestMessage,
+                                    onSelectMessage = { selectedItem ->
+                                        latestMessage = selectedItem.message
+                                        latestMessageTime = selectedItem.timestamp
+                                        prefs.edit().apply {
+                                            putString("latest_message", selectedItem.message)
+                                            putLong("latest_message_time", selectedItem.timestamp)
+                                            apply()
+                                        }
+                                        spawnHeartBurst(500f, 400f, count = 18)
+                                        Toast.makeText(context, "Открытка установлена в превью! Переключитесь на первую вкладку, чтобы увидеть её подробно. 💌", Toast.LENGTH_LONG).show()
+                                    },
+                                    onClearHistory = {
+                                        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                            db.valentineHistoryDao().clearHistory()
+                                            db.valentineHistoryDao().insertHistoryItem(
+                                                ValentineHistoryItem(
+                                                    message = "Добро пожаловать в приложение Валентинка! Пусть твоё сердце всегда будет согрето любовью и нежностью. ❤️",
+                                                    timestamp = System.currentTimeMillis()
+                                                )
+                                            )
+                                        }
+                                        Toast.makeText(context, "История очищена.", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
-            )
-
-            // Romantic signature info box in matching style
-            LiquidGlassInfoBox()
-
-            Spacer(modifier = Modifier.height(16.dp))
+            }
         }
     }
 }
@@ -418,52 +511,58 @@ fun ValentineAppScreen(modifier: Modifier = Modifier) {
 fun AppHeaderSection() {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.padding(top = 12.dp)
+        modifier = Modifier.padding(top = 4.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
                 "💖",
                 fontSize = 24.sp,
-                modifier = Modifier.scale(1.1f)
+                modifier = Modifier.scale(1.15f)
             )
             Text(
                 "Валентинка",
-                fontSize = 34.sp,
-                fontWeight = FontWeight.ExtraBold,
-                fontFamily = FontFamily.Serif,
-                color = Color(0xFFFF4D6D)
+                style = MaterialTheme.typography.headlineMedium.copy(
+                    fontWeight = FontWeight.ExtraBold,
+                    fontFamily = FontFamily.Serif
+                ),
+                color = MaterialTheme.colorScheme.primary
             )
             Text(
                 "🎀",
                 fontSize = 24.sp,
-                modifier = Modifier.scale(1.1f)
+                modifier = Modifier.scale(1.15f)
             )
         }
         Text(
-            "Тёплые объятия в виде уведомлений на вашем телефоне",
-            fontSize = 13.sp,
-            color = Color(0xFFFFB3C1),
-            textAlign = TextAlign.Center,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(top = 6.dp, start = 8.dp, end = 8.dp)
+            "Рассылка тёплых и обнимающих слов на телефон",
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center
+            ),
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+            modifier = Modifier.padding(top = 4.dp, start = 12.dp, end = 12.dp)
         )
     }
 }
 
 @Composable
 fun PermissionRequestBanner(onRequest: () -> Unit) {
-    Box(
+    ElevatedCard(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        ),
         modifier = Modifier
             .fillMaxWidth()
-            .glassmorphic(cornerRadius = 24.dp)
-            .padding(18.dp)
+            .shadow(2.dp, RoundedCornerShape(20.dp))
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(14.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -472,37 +571,38 @@ fun PermissionRequestBanner(onRequest: () -> Unit) {
                 Icon(
                     imageVector = Icons.Default.Notifications,
                     contentDescription = "Включить уведомления",
-                    tint = Color(0xFFFF4D6D)
+                    tint = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    "Подключить уведомления",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    "Включить уведомления",
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.Bold
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Text(
-                "Чтобы приложение могло отправлять вам милые сюрпризы в цикле по таймеру, разрешите, пожалуйста, отправку уведомлений.",
-                fontSize = 13.sp,
-                color = Color(0xFFFFD6E0),
+                "Чтобы приложение отправляло новые валентинки в фоновом режиме, разрешите уведомления в системе.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
                 textAlign = TextAlign.Center,
-                lineHeight = 18.sp
+                lineHeight = 16.sp
             )
             Button(
                 onClick = onRequest,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFFF4D6D).copy(alpha = 0.9f)
+                    containerColor = MaterialTheme.colorScheme.primary
                 ),
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(16.dp),
                 modifier = Modifier
                     .fillMaxWidth(0.9f)
+                    .height(38.dp)
                     .testTag("request_permission_button")
             ) {
                 Text(
                     "Разрешить отправку ❤️",
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    color = Color.White
+                    fontSize = 12.sp
                 )
             }
         }
@@ -529,63 +629,70 @@ fun ValentineCard(
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
     ) {
-        // Tappable Liquid Glass Card
-        Box(
+        // Tappable elevated Material 3 card container
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
+            elevation = CardDefaults.elevatedCardElevation(
+                defaultElevation = 6.dp,
+                pressedElevation = 2.dp
+            ),
             modifier = Modifier
                 .fillMaxWidth()
                 .scale(animatedScale)
-                .glassmorphic(cornerRadius = 28.dp)
                 .pointerInput(Unit) {
                     detectTapGestures { offset ->
-                        cardScale = 0.92f
+                        cardScale = 0.94f
                         onCardClick(offset.x, offset.y)
                     }
                 }
-                .padding(26.dp)
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-                modifier = Modifier.fillMaxWidth()
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.padding(20.dp)
             ) {
-                // Interactive floating big red glowing heart
+                // Large visual romantic card icon
                 Box(
                     modifier = Modifier
-                        .size(64.dp)
-                        .background(Color.White.copy(alpha = 0.15f), CircleShape)
-                        .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape),
+                        .size(60.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
+                        .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         "💝",
-                        fontSize = 34.sp,
+                        fontSize = 32.sp,
                         modifier = Modifier.scale(1.1f)
                     )
                 }
 
-                // Main card frase
+                // Main highlighted romantic quote
                 Text(
                     text = messageText,
-                    fontSize = 21.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Serif,
-                    color = Color.White,
-                    textAlign = TextAlign.Center,
-                    lineHeight = 30.sp,
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Serif,
+                        lineHeight = 26.sp,
+                        textAlign = TextAlign.Center
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 4.dp)
                 )
 
-                Divider(
-                    color = Color.White.copy(alpha = 0.2f),
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                     thickness = 1.dp,
-                    modifier = Modifier.padding(vertical = 4.dp)
+                    modifier = Modifier.padding(vertical = 2.dp)
                 )
 
-                // Bottom timestamp label in matching colors
+                // Timestamp label
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -596,21 +703,23 @@ fun ValentineCard(
                     )
                     Text(
                         text = "Актуальная фраза: ${formatTime(timestamp)}",
-                        fontSize = 12.sp,
-                        color = Color(0xFFFFB3C1),
-                        fontWeight = FontWeight.SemiBold
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontWeight = FontWeight.SemiBold
+                        ),
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
             }
         }
 
         Text(
-            "✨ Нажмите на открытку, чтобы выпустить искры любви! ✨",
-            fontSize = 11.sp,
-            color = Color(0xFFFFB3C1).copy(alpha = 0.8f),
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 10.dp),
-            textAlign = TextAlign.Center
+            "✨ Нажмите на открытку для взрыва искорок! ✨",
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            ),
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+            modifier = Modifier.padding(top = 8.dp)
         )
     }
 }
@@ -623,11 +732,10 @@ fun TimerControlSection(
     onStartTimer: (Long) -> Unit,
     onCancelTimer: () -> Unit
 ) {
-    // Current user local slider selection
     var selectedMinutesState by remember { mutableStateOf(10f) }
     var secondsRemaining by remember { mutableStateOf(0L) }
 
-    // Real-time Countdown sync with precise system millisecond ticks
+    // Synchronize countdown with background ticking timer
     LaunchedEffect(timerEndTime, timerIsActive) {
         if (timerIsActive) {
             while (true) {
@@ -644,30 +752,25 @@ fun TimerControlSection(
         }
     }
 
-    // Dynamic translation helper to change seconds values
-    fun translateSecondsToSelectionValue(seconds: Long): Float {
-        // Translate popular intervals to minutes sliders values
-        return (seconds / 60f).coerceIn(1f, 1440f)
-    }
-
-    // Set slider position on init/update
     LaunchedEffect(timerIntervalSeconds) {
-        selectedMinutesState = translateSecondsToSelectionValue(timerIntervalSeconds)
+        selectedMinutesState = (timerIntervalSeconds / 60f).coerceIn(1f, 1440f)
     }
 
-    // Selected seconds represented by Slider position
     val computedSeconds = remember(selectedMinutesState) {
         (selectedMinutesState.toLong() * 60L).coerceIn(10L, 86400L)
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .glassmorphic(cornerRadius = 28.dp)
-            .padding(22.dp)
+    ElevatedCard(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
     ) {
         Column(
-            verticalArrangement = Arrangement.spacedBy(18.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(18.dp)
         ) {
             // Header
             Row(
@@ -676,24 +779,25 @@ fun TimerControlSection(
             ) {
                 Text(
                     "⏳",
-                    fontSize = 22.sp
+                    fontSize = 24.sp
                 )
                 Text(
-                    "Волшебный стеклянный таймер",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    "Волшебный таймер",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface
                 )
             }
 
             AnimatedVisibility(visible = !timerIsActive) {
                 Column(
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        "Настройте автоповтор, чтобы телефон бесконечно и бережно присылал вам новые милые валентинки через заданный интервал:",
-                        fontSize = 13.sp,
-                        color = Color(0xFFFFD6E0),
+                        "Создайте автоповтор, чтобы новые ласковые открытки и ласковые уведомления прилетали автоматически через выбранное время:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                         lineHeight = 18.sp
                     )
 
@@ -705,27 +809,25 @@ fun TimerControlSection(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                "Интервал доставки:",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
+                                "Интервал:",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
                                 text = "каждые ${formatDurationRussian(computedSeconds)}",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFFFF4D6D)
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Slider(
                             value = selectedMinutesState,
                             onValueChange = { selectedMinutesState = it },
-                            valueRange = 1f..1440f, // 1 minute to 24 hours (1440 mins)
+                            valueRange = 1f..1440f, // 1 minute to 24 hours
                             colors = SliderDefaults.colors(
-                                thumbColor = Color(0xFFFF4D6D),
-                                activeTrackColor = Color(0xFFFF758F),
-                                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+                                thumbColor = MaterialTheme.colorScheme.primary,
+                                activeTrackColor = MaterialTheme.colorScheme.primary,
+                                inactiveTrackColor = MaterialTheme.colorScheme.outlineVariant
                             ),
                             modifier = Modifier.testTag("delay_slider")
                         )
@@ -733,34 +835,33 @@ fun TimerControlSection(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text("1 мин", fontSize = 10.sp, color = Color(0xFFFFB3C1))
-                            Text("12 часов", fontSize = 10.sp, color = Color(0xFFFFB3C1))
-                            Text("24 часа", fontSize = 10.sp, color = Color(0xFFFFB3C1))
+                            Text("1 мин", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                            Text("12 часов", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                            Text("24 часа", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                         }
                     }
 
-                    // Expansive choices of presets
+                    // Expansive Presets Section
                     Text(
-                        "Быстрый выбор красивого пресета:",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFFFFB3C1)
+                        "Быстрые интервалы автоповтора:",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                     )
 
-                    // Presets Grid
+                    // Presets Grid List
                     Column(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             PresetChip(
                                 label = "10 сек (Тест)",
                                 selected = timerIntervalSeconds == 10L && !timerIsActive,
                                 onClick = {
-                                    selectedMinutesState = 0.166f // around 10 seconds
+                                    selectedMinutesState = 0.166f
                                     onStartTimer(10L) 
                                 }
                             )
@@ -783,7 +884,7 @@ fun TimerControlSection(
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             PresetChip(
                                 label = "1 час",
@@ -812,7 +913,7 @@ fun TimerControlSection(
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             PresetChip(
                                 label = "12 часов",
@@ -833,17 +934,17 @@ fun TimerControlSection(
                         }
                     }
 
-                    // Start timer action
+                    Spacer(modifier = Modifier.height(4.dp))
+
                     Button(
                         onClick = { onStartTimer(computedSeconds) },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFFF4D6D).copy(alpha = 0.9f)
+                            containerColor = MaterialTheme.colorScheme.primary
                         ),
-                        shape = RoundedCornerShape(18.dp),
+                        shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
-                            .padding(top = 4.dp)
+                            .height(46.dp)
                             .testTag("start_timer_button")
                     ) {
                         Row(
@@ -857,8 +958,7 @@ fun TimerControlSection(
                             Text(
                                 "Активировать автоповтор ❤️",
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = Color.White
+                                fontSize = 13.sp
                             )
                         }
                     }
@@ -868,27 +968,25 @@ fun TimerControlSection(
             AnimatedVisibility(visible = timerIsActive) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "Автоповтор активен! Следующее приятное уведомление прилетит по таймеру. Каждые ${formatDurationRussian(timerIntervalSeconds)}.",
-                        fontSize = 13.sp,
-                        color = Color(0xFFFFD6E0),
-                        textAlign = TextAlign.Center,
-                        lineHeight = 18.sp
+                        "Автоповтор активен! Новые пожелания летят на устройство каждые ${formatDurationRussian(timerIntervalSeconds)}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                        textAlign = TextAlign.Center
                     )
 
-                    // Countdown visual indicator with beautiful glass circle background
+                    // Countdown Progress Loader Ring
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(150.dp)
-                            .background(Color.White.copy(alpha = 0.08f), CircleShape)
-                            .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                            .padding(12.dp)
+                            .size(130.dp)
+                            .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                            .padding(8.dp)
                     ) {
-                        // Smooth anim fraction calculation
                         val fraction = if (timerIntervalSeconds > 0) {
                             (secondsRemaining.toFloat() / timerIntervalSeconds.toFloat()).coerceIn(0f, 1f)
                         } else {
@@ -896,10 +994,10 @@ fun TimerControlSection(
                         }
 
                         CircularProgressIndicator(
-                            progress = fraction,
-                            strokeWidth = 6.dp,
-                            color = Color(0xFFFF4D6D),
-                            trackColor = Color.White.copy(alpha = 0.15f),
+                            progress = { fraction },
+                            strokeWidth = 5.dp,
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.primaryContainer,
                             modifier = Modifier.fillMaxSize()
                         )
 
@@ -908,42 +1006,40 @@ fun TimerControlSection(
                         ) {
                             Text(
                                 text = "Интервал",
-                                fontSize = 11.sp,
-                                color = Color(0xFFFFB3C1),
-                                fontWeight = FontWeight.Bold
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary
                             )
                             Text(
                                 text = formatSecondsToCountdown(secondsRemaining),
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color.White
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold
+                                ),
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
                                 text = formatDurationRussian(timerIntervalSeconds),
-                                fontSize = 9.sp,
-                                color = Color(0xFFFFB3C1).copy(alpha = 0.8f)
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                             )
                         }
                     }
 
-                    // Cancel loop trigger
                     OutlinedButton(
                         onClick = onCancelTimer,
                         colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = Color.White
+                            contentColor = MaterialTheme.colorScheme.primary
                         ),
-                        border = borderStrokeWhiteGlass(),
-                        shape = RoundedCornerShape(16.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary),
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(46.dp)
+                            .height(44.dp)
                             .testTag("cancel_timer_button")
                     ) {
                         Text(
                             "Остановить автоповтор ⏱️",
                             fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                            color = Color.White
+                            fontSize = 12.sp
                         )
                     }
                 }
@@ -960,59 +1056,213 @@ fun PresetChip(
 ) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(
-                if (selected) Color(0xFFFF4D6D).copy(alpha = 0.8f) 
-                else Color.White.copy(alpha = 0.08f)
+                if (selected) MaterialTheme.colorScheme.primaryContainer 
+                else MaterialTheme.colorScheme.surfaceVariant
             )
             .border(
                 width = 1.dp,
-                color = if (selected) Color(0xFFFF4D6D) else Color.White.copy(alpha = 0.25f),
-                shape = RoundedCornerShape(14.dp)
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                shape = RoundedCornerShape(12.dp)
             )
             .clickable { onClick() }
-            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Text(
             text = label,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            color = if (selected) Color.White else Color(0xFFFFD6E0)
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
 
 @Composable
-fun LiquidGlassInfoBox() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .glassmorphic(cornerRadius = 24.dp)
-            .padding(18.dp)
+fun ValentineHistorySection(
+    historyList: List<ValentineHistoryItem>,
+    currentActiveMessage: String,
+    onSelectMessage: (ValentineHistoryItem) -> Unit,
+    onClearHistory: () -> Unit
+) {
+    ElevatedCard(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
+        modifier = Modifier.fillMaxWidth().fillMaxHeight().padding(top = 8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp).fillMaxHeight(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Header Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "📚",
+                        fontSize = 22.sp
+                    )
+                    Text(
+                        "История валентинок",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                if (historyList.size > 1) {
+                    IconButton(
+                        onClick = onClearHistory,
+                        colors = IconButtonDefaults.iconButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Очистить историю"
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                thickness = 1.dp
+            )
+
+            // History list scroll container fills space, enabling seamless touch interactions
+            if (historyList.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "История пока пуста. Ожидайте новых уведомлений. 🌸",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            } else {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    historyList.forEach { historyItem ->
+                        val isCurrentActive = historyItem.message == currentActiveMessage
+                        
+                        OutlinedCard(
+                            shape = RoundedCornerShape(14.dp),
+                            onClick = { onSelectMessage(historyItem) },
+                            colors = CardDefaults.outlinedCardColors(
+                                containerColor = if (isCurrentActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+                            ),
+                            border = CardDefaults.outlinedCardBorder().copy(
+                                width = if (isCurrentActive) 1.5.dp else 1.dp,
+                                brush = if (isCurrentActive) {
+                                    Brush.linearGradient(colors = listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.secondary))
+                                } else {
+                                    Brush.linearGradient(colors = listOf(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)))
+                                }
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .padding(12.dp)
+                                    .fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = if (isCurrentActive) "💖" else "💌",
+                                    fontSize = 18.sp
+                                )
+                                Column(
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = historyItem.message,
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontWeight = if (isCurrentActive) FontWeight.Bold else FontWeight.Normal
+                                        ),
+                                        color = if (isCurrentActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = formatTime(historyItem.timestamp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (isCurrentActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "💡 Нажмите на любую старую валентинку в списке, чтобы показать её в главном превью первой вкладки!",
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun M3InfoBox() {
+    ElevatedCard(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp),
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .padding(14.dp)
+                .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.Info,
                 contentDescription = "О приложении",
-                tint = Color(0xFFFFB3C1),
-                modifier = Modifier.size(24.dp)
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(22.dp)
             )
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     "Как это устроено?",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = FontWeight.Bold
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    "Установите таймер один раз, и телефон будет регулярно присылать вам милые любовные послания. Каждое новое уведомление сохраняется в вашей красивой открытке сверху с летающими сердечками! 🌸",
-                    fontSize = 12.sp,
-                    color = Color(0xFFFFD6E0),
-                    lineHeight = 16.sp
+                    "Установите автоповтор в следующей вкладке! Приложение будет радовать вас милыми записками в уведомлениях. Все полученные открытки навсегда сохраняются в истории!",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                    lineHeight = 15.sp
                 )
             }
         }
@@ -1020,8 +1270,6 @@ fun LiquidGlassInfoBox() {
 }
 
 // Helpers
-fun borderStrokeWhiteGlass() = androidx.compose.foundation.BorderStroke(1.2.dp, Color.White.copy(alpha = 0.4f))
-
 fun formatDurationRussian(seconds: Long): String {
     if (seconds < 60) {
         return "$seconds сек"
@@ -1058,7 +1306,7 @@ fun formatTime(millis: Long): String {
     return sdf.format(Date(millis))
 }
 
-// Draw heart paths elegantly inside Canvas with rotation and scaling
+// Draw heart paths inside Canvas with rotation and scaling
 fun DrawScope.drawHeart(
     x: Float,
     y: Float,
@@ -1069,7 +1317,6 @@ fun DrawScope.drawHeart(
 ) {
     val scaleFactor = sz / 24f
     val path = Path().apply {
-         // Smooth bezier curve centered at (0,0)
          moveTo(0f, -8f)
          cubicTo(-5.5f, -14.5f, -12f, -10f, -12f, -3.5f)
          cubicTo(-12.5f, 3.5f, -5f, 7.5f, 0f, 12f)

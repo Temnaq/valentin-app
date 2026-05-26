@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.launch
 
 class NotificationReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -20,6 +21,21 @@ class NotificationReceiver : BroadcastReceiver() {
             putString("latest_message", phrase)
             putLong("latest_message_time", System.currentTimeMillis())
             apply()
+        }
+
+        // Save to Room database history asynchronously
+        val pendingResult = goAsync()
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val db = DatabaseProvider.getDatabase(context)
+                db.valentineHistoryDao().insertHistoryItem(
+                    ValentineHistoryItem(message = phrase, timestamp = System.currentTimeMillis())
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                pendingResult.finish()
+            }
         }
 
         // Send active OS notification
@@ -79,7 +95,7 @@ class NotificationReceiver : BroadcastReceiver() {
  * Universal safe scheduler helper to orchestrate exact alarm wakeups and looping background intervals.
  */
 object AlarmScheduler {
-    fun schedule(context: Context, seconds: Long) {
+    fun schedule(context: Context, seconds: Long, baseInterval: Long = seconds) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, NotificationReceiver::class.java)
         val pendingIntent = PendingIntent.getBroadcast(
@@ -93,13 +109,23 @@ object AlarmScheduler {
         val prefs = context.getSharedPreferences("valentinka_prefs", Context.MODE_PRIVATE)
         prefs.edit().apply {
             putLong("timer_end_time", triggerTimeMs)
-            putLong("timer_interval_seconds", seconds)
+            putLong("timer_interval_seconds", baseInterval)
             putBoolean("timer_is_active", true)
             apply()
         }
 
+        val canScheduleExact = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                alarmManager.canScheduleExactAlarms()
+            } else {
+                true
+            }
+        } catch (e: Exception) {
+            false
+        }
+
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (canScheduleExact) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     alarmManager.setExactAndAllowWhileIdle(
                         AlarmManager.RTC_WAKEUP,
@@ -114,19 +140,35 @@ object AlarmScheduler {
                     )
                 }
             } else {
-                alarmManager.setExact(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerTimeMs,
+                        pendingIntent
+                    )
+                } else {
+                    alarmManager.set(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerTimeMs,
+                        pendingIntent
+                    )
+                }
+            }
+        } catch (e: SecurityException) {
+            // Safe fallback method if Permission restrictions block exact timings (e.g. Android 14 schedule limits)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerTimeMs,
+                    pendingIntent
+                )
+            } else {
+                alarmManager.set(
                     AlarmManager.RTC_WAKEUP,
                     triggerTimeMs,
                     pendingIntent
                 )
             }
-        } catch (e: SecurityException) {
-            // Safe fallback method if Permission restrictions block exact timings (e.g. Android 14 schedule limits)
-            alarmManager.set(
-                AlarmManager.RTC_WAKEUP,
-                triggerTimeMs,
-                pendingIntent
-            )
         }
     }
 
