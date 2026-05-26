@@ -1,0 +1,6 @@
+{
+  "name": "Валентинка",
+  "description": "Приложение, которое присылает вам милые и тёплые фразы-валентинки по таймеру и показывает их в красивой интерактивной открытке с летающими сердечками.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
